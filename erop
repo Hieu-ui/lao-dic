@@ -1,0 +1,42 @@
+function findWord(word) {
+  let googleUrl = "https://translate.google.com/m?sl=lo&tl=vi&q=" + encodeURIComponent(word);
+
+  return fetch(googleUrl)
+    .then(response => response.text())
+    .then(html => {
+      let parser = new DOMParser();
+      let doc = parser.parseFromString(html, "text/html");
+      // Lấy phần dịch
+      let result = doc.querySelector(".result-container");
+      if (result) {
+        return [result.textContent.trim()];
+      } else {
+        // Dự phòng: nếu Google thay đổi cấu trúc
+        let allText = doc.body.textContent;
+        return [allText.substring(0, 200).trim()];
+      }
+    });
+}
+
+function getDefinition(word) {
+  return new Promise(function (resolve, reject) {
+    findWord(word)
+      .then(results => {
+        let definition = results.join('\n\n');
+        resolve(definition);
+      })
+      .catch(error => {
+        console.error(error);
+        reject(error);
+      });
+  });
+}
+
+getDefinition(selectedText)
+  .then(definition => {
+    sendResponse(definition);
+  })
+  .catch(error => {
+    console.error(error);
+    sendResponse(null);
+  });
