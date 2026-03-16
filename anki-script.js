@@ -1,503 +1,518 @@
 /**
- * 🎯 Anki Edge TTS - Text-to-Speech Integration
- * 
- * Tích hợp Edge TTS trực tiếp vào Anki
- * ✅ Streaming real-time
- * ✅ Hỗ trợ nhiều giọng đọc
- * ✅ Điều chỉnh tốc độ
- * ✅ Caching audio
- * ✅ Error handling
- * ✅ Loading indicator
+ * ╔═══════════════════════════════════════════════════════════════╗
+ * ║        ANKI EDGE TTS - IMPROVED VERSION                       ║
+ * ║  Text-to-Speech trực tiếp trên Anki với streaming & cache    ║
+ * ╚═══════════════════════════════════════════════════════════════╝
  */
 
-class AnkiEdgeTTS {
-  constructor(options = {}) {
-    // 🔧 Cấu hình mặc định
-    this.config = {
-      cdnUrl: "https://cdn.jsdelivr.net/gh/Mrntn161/langki_anki/edge_tts.js",
-      cacheEnabled: options.cacheEnabled !== false,
-      maxCacheSize: options.maxCacheSize || 50,
-      defaultVoice: options.defaultVoice || "en-US-EmmaMultilingualNeural",
-      defaultRate: options.defaultRate || "+0%",
-      fontSize: options.fontSize || "40px",
-      color: options.color || "#333",
-      hoverColor: options.hoverColor || "#007bff",
-      loadingColor: options.loadingColor || "#ff9800",
-      errorColor: options.errorColor || "#f44336",
-      debug: options.debug || false,
-    };
+(async () => {
+  // ======================== CONFIG ========================
+  const CONFIG = {
+    CDN_URL: "https://cdn.jsdelivr.net/gh/Mrntn161/langki_anki/edge_tts.js",
+    CACHE_DURATION: 7 * 24 * 60 * 60 * 1000, // 7 ngày
+    TIMEOUT: 30000, // 30 giây timeout
+    DEBOUNCE_DELAY: 100, // ms
+    DEFAULT_VOICE: "en-US-EmmaMultilingualNeural",
+    DEFAULT_RATE: "+0%",
+    STORAGE_KEY: "anki_tts_cache",
+  };
 
-    // 💾 Cache
-    this.audioCache = new Map();
-    this.EdgeTTSLib = null;
-    this.isLibraryLoaded = false;
+  // ======================== CACHE MANAGER ========================
+  class CacheManager {
+    constructor() {
+      this.cache = this.loadCache();
+    }
 
-    // 🎨 SVG Icons
-    this.icons = {
-      play: `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="m14.752 11.168-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664Z"/><path d="M21 12a9 9 0 1 1-18 0a9 9 0 0 1 18 0Z"/></svg>`,
-      pause: `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 14.5a6.5 6.5 0 1 1 0-13a6.5 6.5 0 0 1 0 13zM5 5h2v6H5zm4 0h2v6H9z"/></svg>`,
-      loading: `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2" stroke-linecap="round"/></svg>`,
-      error: `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4v.01"/></svg>`,
-    };
+    loadCache() {
+      try {
+        const stored = localStorage.getItem(CONFIG.STORAGE_KEY);
+        return stored ? JSON.parse(stored) : {};
+      } catch (e) {
+        console.error("[TTS] Cache load error:", e);
+        return {};
+      }
+    }
 
-    this.init();
-  }
+    saveCache() {
+      try {
+        localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(this.cache));
+      } catch (e) {
+        console.error("[TTS] Cache save error:", e);
+      }
+    }
 
-  /**
-   * 🚀 Khởi tạo script
-   */
-  async init() {
-    try {
-      // Load thư viện Edge TTS
-      await this.loadEdgeTTSLibrary();
+    getCacheKey(text, voice, rate) {
+      return `${voice}|${rate}|${text}`.replace(/\s+/g, "_");
+    }
 
-      // Tìm và xử lý tất cả phần tử .tts
-      this.processAllElements();
+    get(text, voice, rate) {
+      const key = this.getCacheKey(text, voice, rate);
+      const cached = this.cache[key];
 
-      this.log("✅ Anki Edge TTS initialized successfully");
-    } catch (error) {
-      this.error("Failed to initialize Anki Edge TTS", error);
+      if (!cached) return null;
+
+      // Kiểm tra cache có hết hạn không
+      if (Date.now() - cached.timestamp > CONFIG.CACHE_DURATION) {
+        delete this.cache[key];
+        this.saveCache();
+        return null;
+      }
+
+      return cached.data;
+    }
+
+    set(text, voice, rate, data) {
+      const key = this.getCacheKey(text, voice, rate);
+      this.cache[key] = {
+        data,
+        timestamp: Date.now(),
+      };
+
+      // Giới hạn cache size (max 50 items)
+      const keys = Object.keys(this.cache);
+      if (keys.length > 50) {
+        const oldestKey = keys.reduce((oldest, current) =>
+          this.cache[current].timestamp < this.cache[oldest].timestamp
+            ? current
+            : oldest
+        );
+        delete this.cache[oldestKey];
+      }
+
+      this.saveCache();
+    }
+
+    clear() {
+      this.cache = {};
+      localStorage.removeItem(CONFIG.STORAGE_KEY);
     }
   }
 
-  /**
-   * 📥 Tải thư viện Edge TTS từ CDN
-   */
-  async loadEdgeTTSLibrary() {
-    if (this.isLibraryLoaded) return;
+  // ======================== UI MANAGER ========================
+  class UIManager {
+    static getPlayIcon() {
+      return `
+        <svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <circle cx="12" cy="12" r="10" fill="rgba(0,0,0,0.1)"/>
+          <path d="m9.5 7.5 6.5 4.5-6.5 4.5Z"/>
+        </svg>`;
+    }
 
-    try {
-      // Kiểm tra đã load chưa
-      if (document.getElementById("edge-tts-lib")) {
-        this.EdgeTTSLib = window.BrowserCommunicate;
-        this.isLibraryLoaded = true;
-        return;
-      }
+    static getPauseIcon() {
+      return `
+        <svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="12" cy="12" r="10" fill="rgba(0,0,0,0.1)"/>
+          <path d="M9 8v8M15 8v8" stroke="currentColor" stroke-width="2"/>
+        </svg>`;
+    }
 
-      // Tải từ CDN
-      const response = await fetch(this.config.cdnUrl);
-      if (!response.ok) {
-        throw new Error(`CDN load failed: ${response.status}`);
-      }
-
-      const scriptContent = await response.text();
-      const script = document.createElement("script");
-      script.id = "edge-tts-lib";
-      script.text = scriptContent;
-      document.body.prepend(script);
-
-      // Đợi library được load
-      await new Promise((resolve) => {
-        const interval = setInterval(() => {
-          if (window.BrowserCommunicate) {
-            clearInterval(interval);
-            this.EdgeTTSLib = window.BrowserCommunicate;
-            this.isLibraryLoaded = true;
-            resolve();
+    static getLoadingIcon() {
+      return `
+        <svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10" opacity="0.3"/>
+          <path d="M12 2a10 10 0 0 1 10 10" stroke-dasharray="15.7" stroke-dashoffset="0" style="animation: spin 1s linear infinite"/>
+        </svg>
+        <style>
+          @keyframes spin {
+            to { stroke-dashoffset: -31.4; }
           }
-        }, 100);
-        setTimeout(() => clearInterval(interval), 10000); // Timeout 10s
-      });
-    } catch (error) {
-      throw new Error(`Failed to load Edge TTS library: ${error.message}`);
+        </style>`;
+    }
+
+    static getErrorIcon() {
+      return `
+        <svg xmlns="http://www.w3.org/2000/svg" width="40" height="50" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="12" cy="12" r="10" fill="#ff4444"/>
+          <text x="12" y="14" text-anchor="middle" fill="white" font-size="14" font-weight="bold">!</text>
+        </svg>`;
+    }
+
+    static createStyleSheet() {
+      if (document.getElementById("anki-tts-styles")) return;
+
+      const style = document.createElement("style");
+      style.id = "anki-tts-styles";
+      style.textContent = `
+        .tts {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 50px;
+          height: 50px;
+          border-radius: 50%;
+          cursor: pointer;
+          user-select: none;
+          transition: all 0.2s ease;
+          color: #333;
+          background: linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 100%);
+          border: 2px solid #ddd;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+          font-size: 24px;
+        }
+
+        .tts:hover:not(.tts-loading):not(.tts-error) {
+          color: #007bff;
+          background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+          border-color: #007bff;
+          box-shadow: 0 4px 8px rgba(0,123,255,0.2);
+          transform: scale(1.05);
+        }
+
+        .tts:active:not(.tts-loading):not(.tts-error) {
+          transform: scale(0.95);
+          box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .tts-playing {
+          color: #ff6b6b;
+          background: linear-gradient(135deg, #ffe3e3 0%, #ffc9c9 100%);
+          border-color: #ff6b6b;
+          box-shadow: 0 4px 8px rgba(255,107,107,0.2);
+        }
+
+        .tts-loading {
+          cursor: not-allowed;
+          opacity: 0.7;
+        }
+
+        .tts-error {
+          color: #ff4444;
+          background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%);
+          border-color: #ff4444;
+          opacity: 0.8;
+        }
+
+        .tts-tooltip {
+          position: absolute;
+          background: rgba(0,0,0,0.8);
+          color: white;
+          padding: 6px 10px;
+          border-radius: 4px;
+          font-size: 12px;
+          white-space: nowrap;
+          pointer-events: none;
+          z-index: 10000;
+          margin-top: -35px;
+          display: none;
+        }
+
+        .tts:hover .tts-tooltip {
+          display: block;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+          .tts {
+            width: 45px;
+            height: 45px;
+          }
+        }
+      `;
+      document.head.appendChild(style);
     }
   }
 
-  /**
-   * 🔍 Tìm và xử lý tất cả phần tử .tts
-   */
-  processAllElements() {
-    const elements = document.querySelectorAll(".tts");
-    this.log(`Found ${elements.length} TTS elements`);
+  // ======================== TTS PLAYER ========================
+  class TTSPlayer {
+    constructor(element, text, voice, rate) {
+      this.element = element;
+      this.text = text;
+      this.voice = voice || CONFIG.DEFAULT_VOICE;
+      this.rate = rate || CONFIG.DEFAULT_RATE;
 
-    elements.forEach((element, index) => {
-      const text = element.getAttribute("text");
-      const voice = element.getAttribute("voice") || this.config.defaultVoice;
-      const rate = element.getAttribute("rate") || this.config.defaultRate;
+      this.isPlaying = false;
+      this.isLoading = false;
+      this.audio = null;
+      this.mediaSource = null;
+      this.sourceBuffer = null;
+      this.queue = [];
+      this.ended = false;
+      this.controller = null;
 
-      if (!text) {
-        this.error(`Element ${index} missing 'text' attribute`);
-        return;
-      }
-
-      this.attachTTSButton(element, text, voice, rate);
-    });
-  }
-
-  /**
-   * 🎛️ Gắn TTS button vào element
-   */
-  attachTTSButton(element, text, voice, rate) {
-    const ttsManager = new TTSManager(text, voice, rate, this);
-
-    // Styling
-    this.applyStyles(element);
-
-    // Icon mặc định
-    element.innerHTML = this.icons.play;
-    element.setAttribute("data-tts-state", "idle"); // idle | loading | playing | paused | error
-
-    // Event listeners
-    element.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      ttsManager.togglePlayPause(element);
-    });
-
-    element.addEventListener("mouseenter", () => {
-      if (element.getAttribute("data-tts-state") === "idle") {
-        element.style.color = this.config.hoverColor;
-      }
-    });
-
-    element.addEventListener("mouseleave", () => {
-      if (element.getAttribute("data-tts-state") === "idle") {
-        element.style.color = this.config.color;
-      }
-    });
-
-    element.addEventListener("mousedown", () => {
-      element.style.transform = "scale(0.9)";
-    });
-
-    element.addEventListener("mouseup", () => {
-      element.style.transform = "scale(1)";
-    });
-
-    // Lưu reference
-    element._ttsManager = ttsManager;
-  }
-
-  /**
-   * 🎨 Áp dụng styling
-   */
-  applyStyles(element) {
-    Object.assign(element.style, {
-      fontSize: this.config.fontSize,
-      color: this.config.color,
-      cursor: "pointer",
-      userSelect: "none",
-      transition: "transform 0.2s, color 0.2s",
-      display: "inline-block",
-      padding: "0",
-      border: "none",
-      background: "transparent",
-    });
-  }
-
-  /**
-   * 💾 Lưu audio vào cache
-   */
-  cacheAudio(key, audioBlob) {
-    if (!this.config.cacheEnabled) return;
-
-    // Giới hạn cache size
-    if (this.audioCache.size >= this.config.maxCacheSize) {
-      const firstKey = this.audioCache.keys().next().value;
-      this.audioCache.delete(firstKey);
+      this.init();
     }
 
-    this.audioCache.set(key, audioBlob);
-  }
+    init() {
+      this.element.classList.add("tts");
+      this.element.innerHTML = UIManager.getPlayIcon();
 
-  /**
-   * 🔍 Lấy audio từ cache
-   */
-  getFromCache(key) {
-    return this.audioCache.get(key);
-  }
+      // Tooltip
+      const tooltip = document.createElement("div");
+      tooltip.className = "tts-tooltip";
+      tooltip.textContent = "Click để phát";
+      this.element.appendChild(tooltip);
 
-  /**
-   * 🗑️ Xóa cache
-   */
-  clearCache() {
-    this.audioCache.clear();
-    this.log("Cache cleared");
-  }
-
-  /**
-   * 📊 Log debug
-   */
-  log(message) {
-    if (this.config.debug) {
-      console.log(`[AnkiEdgeTTS] ${message}`);
+      // Event listeners
+      this.element.addEventListener("click", () => this.handleClick());
     }
-  }
 
-  /**
-   * ⚠️ Log error
-   */
-  error(message, error = null) {
-    console.error(`[AnkiEdgeTTS] ${message}`, error);
-  }
-}
+    async handleClick() {
+      if (this.isLoading) return;
 
-/**
- * 🎙️ TTS Manager - Quản lý từng instance TTS
- */
-class TTSManager {
-  constructor(text, voice, rate, ankiTTS) {
-    this.text = text;
-    this.voice = voice;
-    this.rate = rate;
-    this.ankiTTS = ankiTTS;
-
-    this.isPlaying = false;
-    this.isPaused = false;
-    this.audio = null;
-    this.mediaSource = null;
-    this.sourceBuffer = null;
-    this.chunks = [];
-    this.isStreaming = false;
-    this.controller = null;
-  }
-
-  /**
-   * ▶️/⏸️ Toggle play/pause
-   */
-  async togglePlayPause(element) {
-    try {
-      // Resume từ pause
-      if (this.isPaused && this.audio && this.isStreaming) {
+      // Tiếp tục nếu bị tạm dừng
+      if (this.isPlaying && this.audio?.paused) {
         this.audio.play();
-        this.isPlaying = true;
-        this.isPaused = false;
-        element.innerHTML = this.ankiTTS.icons.pause;
-        element.setAttribute("data-tts-state", "playing");
+        this.element.innerHTML = UIManager.getPauseIcon();
         return;
       }
 
-      // Pause
-      if (this.isPlaying && this.audio && !this.audio.paused) {
+      // Tạm dừng nếu đang phát
+      if (this.isPlaying && !this.audio?.paused) {
         this.audio.pause();
-        this.isPlaying = false;
-        this.isPaused = true;
-        element.innerHTML = this.ankiTTS.icons.play;
-        element.setAttribute("data-tts-state", "paused");
+        this.element.innerHTML = UIManager.getPlayIcon();
+        this.element.classList.remove("tts-playing");
         return;
       }
 
-      // First play
-      if (!this.isPlaying) {
-        await this.play(element);
-      }
-    } catch (error) {
-      this.showError(element, error);
+      // Phát lần đầu
+      await this.play();
     }
-  }
 
-  /**
-   * 🎵 Phát audio
-   */
-  async play(element) {
-    try {
-      element.innerHTML = this.ankiTTS.icons.loading;
-      element.setAttribute("data-tts-state", "loading");
-      element.style.color = this.ankiTTS.config.loadingColor;
+    async play() {
+      try {
+        this.setLoading(true);
 
-      // Tạo cache key
-      const cacheKey = `${this.text}|${this.voice}|${this.rate}`;
+        // Kiểm tra cache
+        const cached = cacheManager.get(this.text, this.voice, this.rate);
+        if (cached) {
+          this.playFromBuffer(cached);
+          return;
+        }
 
-      // Kiểm tra cache
-      const cachedAudio = this.ankiTTS.getFromCache(cacheKey);
-      if (cachedAudio) {
-        this.ankiTTS.log(`Loaded from cache: ${cacheKey}`);
-        this.playFromBlob(cachedAudio, element);
-        return;
+        // Stream từ API
+        await this.streamAudio();
+      } catch (error) {
+        this.handleError(error);
+      } finally {
+        this.setLoading(false);
       }
-
-      // Stream từ Edge TTS
-      await this.streamAudio(element, cacheKey);
-    } catch (error) {
-      this.showError(element, error);
     }
-  }
 
-  /**
-   * 🔊 Stream audio từ Edge TTS
-   */
-  async streamAudio(element, cacheKey) {
-    try {
-      this.mediaSource = new MediaSource();
-      const audioUrl = URL.createObjectURL(this.mediaSource);
-      this.audio = new Audio(audioUrl);
-      this.isPlaying = true;
-      this.isStreaming = true;
-      this.chunks = [];
+    async streamAudio() {
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Timeout")), CONFIG.TIMEOUT)
+      );
 
-      // Setup media source
-      this.mediaSource.addEventListener("sourceopen", async () => {
-        try {
+      try {
+        this.controller = new AbortController();
+        const EdgeTTS = await this.loadEdgeTTS();
+
+        // Setup media source
+        this.mediaSource = new MediaSource();
+        const audioUrl = URL.createObjectURL(this.mediaSource);
+        this.audio = new Audio(audioUrl);
+        this.isPlaying = true;
+        this.ended = false;
+
+        this.element.innerHTML = UIManager.getPauseIcon();
+        this.element.classList.add("tts-playing");
+
+        this.mediaSource.addEventListener("sourceopen", async () => {
           this.sourceBuffer = this.mediaSource.addSourceBuffer(
             "audio/mpeg"
           );
 
           this.sourceBuffer.addEventListener("updateend", () => {
-            if (this.chunks.length > 0 && !this.sourceBuffer.updating) {
-              this.sourceBuffer.appendBuffer(this.chunks.shift());
+            if (this.queue.length > 0 && !this.sourceBuffer.updating) {
+              this.sourceBuffer.appendBuffer(this.queue.shift());
+            } else if (this.ended && !this.sourceBuffer.updating) {
+              this.mediaSource.endOfStream();
             }
           });
 
-          // Gọi Edge TTS
-          const EdgeTTS = this.ankiTTS.EdgeTTSLib;
           const communicate = new EdgeTTS(this.text, {
             voice: this.voice,
             format: "audio-16khz-32kbitrate-mono-mp3",
             rate: this.rate,
           });
 
-          let fullBuffer = null;
+          let audioChunks = [];
 
-          // Stream từng chunk
           for await (const chunk of communicate.stream()) {
-            if (!this.isStreaming) break;
+            if (!this.isPlaying) break;
 
             if (chunk.type === "audio" && chunk.data) {
               const buffer = new Uint8Array(chunk.data).buffer;
+              audioChunks.push(buffer);
 
-              // Lưu lại toàn bộ buffer để cache
-              if (!fullBuffer) {
-                fullBuffer = new Uint8Array(chunk.data);
-              } else {
-                const temp = new Uint8Array(
-                  fullBuffer.length + chunk.data.length
-                );
-                temp.set(fullBuffer);
-                temp.set(new Uint8Array(chunk.data), fullBuffer.length);
-                fullBuffer = temp;
-              }
-
-              // Append vào source buffer
-              if (this.sourceBuffer.updating || this.chunks.length > 0) {
-                this.chunks.push(buffer);
+              if (this.sourceBuffer.updating || this.queue.length > 0) {
+                this.queue.push(buffer);
               } else {
                 this.sourceBuffer.appendBuffer(buffer);
               }
             }
           }
 
-          // Lưu vào cache
-          if (fullBuffer) {
-            const blob = new Blob([fullBuffer], { type: "audio/mpeg" });
-            this.ankiTTS.cacheAudio(cacheKey, blob);
-          }
+          // Cache audio
+          const audioData = new Blob(
+            audioChunks.map((b) => new Uint8Array(b))
+          );
+          cacheManager.set(this.text, this.voice, this.rate, audioData);
 
-          // Kết thúc stream
+          this.ended = true;
           if (!this.sourceBuffer.updating) {
             this.mediaSource.endOfStream();
           }
-        } catch (error) {
-          this.showError(element, error);
+        });
+
+        this.audio.play();
+
+        this.audio.onended = () => {
+          this.isPlaying = false;
+          this.element.innerHTML = UIManager.getPlayIcon();
+          this.element.classList.remove("tts-playing");
+        };
+
+        await Promise.race([
+          new Promise((resolve) => (this.audio.onended = resolve)),
+          timeout,
+        ]);
+      } catch (error) {
+        throw error;
+      }
+    }
+
+    playFromBuffer(audioBlob) {
+      try {
+        const audioUrl = URL.createObjectURL(audioBlob);
+        this.audio = new Audio(audioUrl);
+        this.isPlaying = true;
+
+        this.element.innerHTML = UIManager.getPauseIcon();
+        this.element.classList.add("tts-playing");
+
+        this.audio.play();
+
+        this.audio.onended = () => {
+          this.isPlaying = false;
+          this.element.innerHTML = UIManager.getPlayIcon();
+          this.element.classList.remove("tts-playing");
+        };
+      } catch (error) {
+        this.handleError(error);
+      }
+    }
+
+    setLoading(loading) {
+      this.isLoading = loading;
+      if (loading) {
+        this.element.innerHTML = UIManager.getLoadingIcon();
+        this.element.classList.add("tts-loading");
+      } else {
+        this.element.classList.remove("tts-loading");
+      }
+    }
+
+    handleError(error) {
+      console.error("[TTS Error]", error);
+      this.isPlaying = false;
+      this.element.innerHTML = UIManager.getErrorIcon();
+      this.element.classList.add("tts-error");
+
+      setTimeout(() => {
+        if (!this.isPlaying) {
+          this.element.innerHTML = UIManager.getPlayIcon();
+          this.element.classList.remove("tts-error");
+        }
+      }, 3000);
+    }
+
+    async loadEdgeTTS() {
+      if (window.BrowserCommunicate) {
+        return window.BrowserCommunicate;
+      }
+
+      await this.installCDN();
+      return window.BrowserCommunicate;
+    }
+
+    async installCDN() {
+      return new Promise((resolve, reject) => {
+        try {
+          const script = document.createElement("script");
+          script.src = CONFIG.CDN_URL;
+          script.async = true;
+
+          script.onload = () => {
+            resolve();
+          };
+
+          script.onerror = () => {
+            reject(new Error("Failed to load TTS library"));
+          };
+
+          document.body.appendChild(script);
+        } catch (e) {
+          reject(e);
         }
       });
-
-      // Play
-      this.audio.play();
-      element.innerHTML = this.ankiTTS.icons.pause;
-      element.setAttribute("data-tts-state", "playing");
-      element.style.color = this.ankiTTS.config.color;
-
-      // Cleanup on end
-      this.audio.onended = () => {
-        this.isPlaying = false;
-        this.isStreaming = false;
-        this.isPaused = false;
-        element.innerHTML = this.ankiTTS.icons.play;
-        element.setAttribute("data-tts-state", "idle");
-        element.style.color = this.ankiTTS.config.color;
-      };
-
-      this.audio.onerror = (e) => {
-        this.showError(element, new Error("Audio playback error"));
-      };
-    } catch (error) {
-      this.showError(element, error);
     }
-  }
 
-  /**
-   * 🎵 Phát từ Blob (cached)
-   */
-  playFromBlob(blob, element) {
-    const url = URL.createObjectURL(blob);
-    this.audio = new Audio(url);
-    this.isPlaying = true;
-    this.isStreaming = true;
-
-    this.audio.play();
-    element.innerHTML = this.ankiTTS.icons.pause;
-    element.setAttribute("data-tts-state", "playing");
-    element.style.color = this.ankiTTS.config.color;
-
-    this.audio.onended = () => {
+    stop() {
       this.isPlaying = false;
-      this.isStreaming = false;
-      this.isPaused = false;
-      element.innerHTML = this.ankiTTS.icons.play;
-      element.setAttribute("data-tts-state", "idle");
-      element.style.color = this.ankiTTS.config.color;
-    };
-
-    this.audio.onerror = (e) => {
-      this.showError(element, new Error("Audio playback error"));
-    };
-  }
-
-  /**
-   * ❌ Hiển thị error
-   */
-  showError(element, error) {
-    this.ankiTTS.error(`TTS Error: ${error.message}`, error);
-
-    this.isPlaying = false;
-    this.isStreaming = false;
-    this.isPaused = false;
-
-    element.innerHTML = this.ankiTTS.icons.error;
-    element.setAttribute("data-tts-state", "error");
-    element.style.color = this.ankiTTS.config.errorColor;
-
-    // Timeout - reset sau 3s
-    setTimeout(() => {
-      if (element.getAttribute("data-tts-state") === "error") {
-        element.innerHTML = this.ankiTTS.icons.play;
-        element.setAttribute("data-tts-state", "idle");
-        element.style.color = this.ankiTTS.config.color;
+      if (this.audio) {
+        this.audio.pause();
+        this.audio = null;
       }
-    }, 3000);
-  }
-
-  /**
-   * 🛑 Stop
-   */
-  stop() {
-    if (this.audio) {
-      this.audio.pause();
-      this.audio = null;
+      if (this.controller) {
+        this.controller.abort();
+      }
+      this.element.innerHTML = UIManager.getPlayIcon();
+      this.element.classList.remove("tts-playing");
     }
-    this.isPlaying = false;
-    this.isStreaming = false;
-    this.isPaused = false;
   }
-}
 
-/**
- * 🚀 Auto-initialize khi DOM ready
- */
-(async () => {
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-      new AnkiEdgeTTS({
-        debug: false, // Đổi thành true để xem logs
-        cacheEnabled: true,
-        maxCacheSize: 50,
-      });
+  // ======================== INITIALIZATION ========================
+  const cacheManager = new CacheManager();
+
+  // Tạo stylesheet
+  UIManager.createStyleSheet();
+
+  // Tìm tất cả phần tử TTS
+  const elements = document.querySelectorAll("[data-tts]");
+
+  if (elements.length === 0) {
+    // Fallback cho class="tts"
+    const legacyElements = document.querySelectorAll(".tts");
+    legacyElements.forEach((el) => {
+      const text = el.getAttribute("text");
+      const voice = el.getAttribute("voice");
+      const rate = el.getAttribute("rate");
+
+      if (text) {
+        new TTSPlayer(el, text, voice, rate);
+      }
     });
   } else {
-    new AnkiEdgeTTS({
-      debug: false,
-      cacheEnabled: true,
-      maxCacheSize: 50,
+    elements.forEach((el) => {
+      const text = el.getAttribute("data-tts");
+      const voice = el.getAttribute("data-voice");
+      const rate = el.getAttribute("data-rate");
+
+      if (text) {
+        new TTSPlayer(el, text, voice, rate);
+      }
     });
   }
+
+  // ======================== GLOBAL API ========================
+  window.TTSManager = {
+    clearCache: () => {
+      cacheManager.clear();
+      console.log("[TTS] Cache cleared");
+    },
+
+    getCache: () => {
+      return cacheManager.cache;
+    },
+
+    stopAll: () => {
+      document.querySelectorAll(".tts").forEach((el) => {
+        const audio = el._ttsPlayer?.audio;
+        if (audio) audio.pause();
+      });
+    },
+  };
+
+  console.log("[TTS] ✅ Anki Edge TTS Improved loaded successfully");
 })();
